@@ -270,7 +270,8 @@ public static class Program
             HeartbeatInterval = TimeSpan.FromSeconds(30)
         };
 
-        var client = new MeshClient(config);
+        // Use name as identity salt to ensure unique client IDs on same machine
+        var client = new MeshClient(config, identitySalt: name);
         var messages = new List<ReceivedMessage>();
 
         client.MessageReceived += async (sourceId, data) =>
