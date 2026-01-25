@@ -7,4 +7,13 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Remove="MeshAI.Demo\**" />
+    <Compile Remove="MeshAI.Tests\**" />
+    <EmbeddedResource Remove="MeshAI.Demo\**" />
+    <EmbeddedResource Remove="MeshAI.Tests\**" />
+    <None Remove="MeshAI.Demo\**" />
+    <None Remove="MeshAI.Tests\**" />
+  </ItemGroup>
+
 </Project>

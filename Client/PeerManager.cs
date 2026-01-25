@@ -118,14 +118,15 @@ public sealed class PeerManager : IAsyncDisposable
                 connection.CompleteKeyExchange(localKeyExchange, response.Payload);
                 connection.SetRemoteClientId(peerInfo.ClientId);
 
-                // Send peer connect
-                var connectMessage = new DirectMessagePayload
+                // Send peer connect using PeerConnect message type
+                var connectPayload = new DirectMessagePayload
                 {
                     SourceClientId = localClientId,
                     TargetClientId = peerInfo.ClientId,
                     Data = []
                 };
-                await connection.SendAsync(connectMessage);
+                var connectFrame = MessageFrame.Create(MessageType.PeerConnect, connectPayload.ToBytes());
+                await connection.SendFrameAsync(connectFrame);
 
                 // Create peer connection wrapper
                 var peer = new PeerConnection(peerInfo, connection);
