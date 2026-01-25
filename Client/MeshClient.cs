@@ -513,6 +513,14 @@ public sealed class MeshClient : IAsyncDisposable
 
     private async Task<bool> SendViaRelayAsync(string targetClientId, byte[] data, CancellationToken cancellationToken)
     {
+        // Check if target is a known peer - if not, there's no route
+        var targetKnown = _knownPeers.Any(p => p.ClientId == targetClientId);
+        if (!targetKnown)
+        {
+            _log.Warn("Unknown target client {0}", targetClientId[..Math.Min(16, targetClientId.Length)]);
+            return false;
+        }
+
         // Note: End-to-end encryption requires key exchange with target.
         // For server-mediated relay, transport-level encryption provides security.
         // Data is sent as-is; encrypted at transport layer.
