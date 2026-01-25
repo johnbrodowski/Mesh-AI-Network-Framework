@@ -52,6 +52,12 @@ public sealed class TcpConnection : IAsyncDisposable
     public bool IsConnected => _stateMachine.IsConnected;
 
     /// <summary>
+    /// Whether the connection can send/receive data (connected or in key exchange).
+    /// </summary>
+    public bool CanCommunicate => State is ConnectionState.Connected
+                                        or ConnectionState.KeyExchange;
+
+    /// <summary>
     /// Time of last activity on this connection.
     /// </summary>
     public DateTime LastActivity => _lastActivity;
@@ -190,7 +196,7 @@ public sealed class TcpConnection : IAsyncDisposable
     {
         try
         {
-            while (!cancellationToken.IsCancellationRequested && IsConnected)
+            while (!cancellationToken.IsCancellationRequested && CanCommunicate)
             {
                 var frame = await _reader!.ReadFrameAsync(cancellationToken);
                 if (frame == null)

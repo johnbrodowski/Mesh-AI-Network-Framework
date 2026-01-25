@@ -92,17 +92,29 @@ public class MeshNetworkTests : IAsyncLifetime
             ServerEndPoint = new IPEndPoint(IPAddress.Loopback, serverPort),
             ListenPort = clientPort,
             CanRelay = canRelay,
-            IdentitySalt = salt ?? Guid.NewGuid().ToString()
+            IdentitySalt = salt ?? Guid.NewGuid().ToString(),
+            ConnectionTimeout = TimeSpan.FromSeconds(5)
         };
 
         var client = new MeshClient(config);
         _clients.Add(client);
 
-        await client.StartAsync();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            await client.StartAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _output.WriteLine($"Client startup timed out on port {clientPort}");
+            throw new TimeoutException($"Client failed to start within timeout on port {clientPort}");
+        }
 
         // Wait for registration to complete
         var timeout = DateTime.UtcNow.AddSeconds(5);
-        while (client.State != ClientState.Connected && DateTime.UtcNow < timeout)
+        while (client.State != ClientState.Connected &&
+               client.State != ClientState.Failed &&
+               DateTime.UtcNow < timeout)
         {
             await Task.Delay(50);
         }

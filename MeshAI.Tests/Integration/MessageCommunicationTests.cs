@@ -101,10 +101,21 @@ public class MessageCommunicationTests : IAsyncLifetime
             await Task.CompletedTask;
         };
 
-        await client.StartAsync();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            await client.StartAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _output.WriteLine($"Client startup timed out on port {clientPort}");
+            throw new TimeoutException($"Client failed to start within timeout");
+        }
 
         var timeout = DateTime.UtcNow.AddSeconds(5);
-        while (client.State != ClientState.Connected && DateTime.UtcNow < timeout)
+        while (client.State != ClientState.Connected &&
+               client.State != ClientState.Failed &&
+               DateTime.UtcNow < timeout)
         {
             await Task.Delay(50);
         }
