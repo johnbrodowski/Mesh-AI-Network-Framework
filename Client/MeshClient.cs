@@ -79,6 +79,11 @@ public sealed class MeshClient : IAsyncDisposable
     public IPAddress? PublicAddress { get; private set; }
 
     /// <summary>
+    /// Known peers from server peer list.
+    /// </summary>
+    public IEnumerable<PeerInfo> KnownPeers => _knownPeers.AsReadOnly();
+
+    /// <summary>
     /// Event raised when state changes.
     /// </summary>
     public event Action<ClientState, ClientState>? StateChanged;
