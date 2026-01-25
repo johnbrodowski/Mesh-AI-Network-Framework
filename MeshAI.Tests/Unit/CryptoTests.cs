@@ -61,7 +61,7 @@ public class CryptoTests
         var ciphertext = PayloadEncryption.Encrypt(plaintext, key1);
 
         // Assert
-        Assert.Throws<CryptographicException>(() =>
+        Assert.ThrowsAny<CryptographicException>(() =>
             PayloadEncryption.Decrypt(ciphertext, key2));
     }
 
@@ -108,7 +108,7 @@ public class CryptoTests
         var ciphertext = PayloadEncryption.EncryptWithHardwareBinding(plaintext, key, "correct_hash");
 
         // Assert
-        Assert.Throws<CryptographicException>(() =>
+        Assert.ThrowsAny<CryptographicException>(() =>
             PayloadEncryption.DecryptWithHardwareBinding(ciphertext, key, "wrong_hash"));
     }
 

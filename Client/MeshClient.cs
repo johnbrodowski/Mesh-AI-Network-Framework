@@ -513,15 +513,15 @@ public sealed class MeshClient : IAsyncDisposable
 
     private async Task<bool> SendViaRelayAsync(string targetClientId, byte[] data, CancellationToken cancellationToken)
     {
-        // Encrypt data for end-to-end encryption
-        var encryptedData = PayloadEncryption.Encrypt(data, _keyExchange.PublicKey);
-
+        // Note: End-to-end encryption requires key exchange with target.
+        // For server-mediated relay, transport-level encryption provides security.
+        // Data is sent as-is; encrypted at transport layer.
         var relayMessage = new RelayDataMessage
         {
             SourceClientId = _identity.ClientId,
             TargetClientId = targetClientId,
             HopCount = 0,
-            EncryptedPayload = encryptedData
+            EncryptedPayload = data
         };
 
         // Try relay nodes

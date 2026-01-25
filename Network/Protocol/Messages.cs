@@ -305,14 +305,19 @@ public sealed class PeerListMessage : IMessagePayload
     public byte[] ToBytes()
     {
         using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms);
 
-        writer.Write((ushort)Peers.Count);
+        // Write count as big-endian
+        var countBytes = new byte[2];
+        BinaryPrimitives.WriteUInt16BigEndian(countBytes, (ushort)Peers.Count);
+        ms.Write(countBytes);
+
         foreach (var peer in Peers)
         {
             var peerBytes = peer.ToBytes();
-            writer.Write((ushort)peerBytes.Length);
-            writer.Write(peerBytes);
+            var lengthBytes = new byte[2];
+            BinaryPrimitives.WriteUInt16BigEndian(lengthBytes, (ushort)peerBytes.Length);
+            ms.Write(lengthBytes);
+            ms.Write(peerBytes);
         }
 
         return ms.ToArray();
