@@ -425,8 +425,9 @@ public sealed class MeshClient : IAsyncDisposable
             return;
         }
 
-        // Handle peer connect
-        if (frame.Header.Type == MessageType.DirectMessage || frame.Header.Type == MessageType.PeerConnect)
+        // Handle peer connect - only PeerConnect type, not DirectMessage
+        // DirectMessage is handled by PeerManager after peer is accepted
+        if (frame.Header.Type == MessageType.PeerConnect)
         {
             var message = DirectMessagePayload.FromBytes(frame.Payload);
             var peerInfo = new PeerInfo
