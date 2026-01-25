@@ -124,15 +124,25 @@ public sealed class SessionKeys : IDisposable
         // Determine key ordering based on public key comparison
         var comparison = CompareBytes(localPublicKey, peerPublicKey);
 
-        // Generate session ID
-        var sessionId = SHA256.HashData([.. localPublicKey, .. peerPublicKey]);
+        // Generate session ID in deterministic order (sorted public keys)
+        byte[] sessionId;
+        if (comparison < 0)
+        {
+            sessionId = SHA256.HashData([.. localPublicKey, .. peerPublicKey]);
+        }
+        else
+        {
+            sessionId = SHA256.HashData([.. peerPublicKey, .. localPublicKey]);
+        }
 
         // Derive keys with different info for send/receive
+        // The "lower" key holder uses key1 for send, key2 for receive
+        // The "higher" key holder uses key2 for send, key1 for receive
         var salt = sessionId;
-        var key1 = PayloadEncryption.DeriveKey(sharedSecret, salt, "send"u8.ToArray());
-        var key2 = PayloadEncryption.DeriveKey(sharedSecret, salt, "receive"u8.ToArray());
+        var key1 = PayloadEncryption.DeriveKey(sharedSecret, salt, "key1"u8.ToArray());
+        var key2 = PayloadEncryption.DeriveKey(sharedSecret, salt, "key2"u8.ToArray());
 
-        // Assign keys based on ordering
+        // Assign keys based on ordering - lower public key gets key1 as send
         if (comparison < 0)
         {
             return new SessionKeys(key1, key2, sessionId);
