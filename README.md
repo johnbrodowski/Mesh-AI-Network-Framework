@@ -55,6 +55,8 @@ MeshAI/
 └── MeshAI.Tests/        # Unit and integration tests
 ```
 
+<img width="1309" height="436" alt="image" src="https://github.com/user-attachments/assets/4f71dcc6-7f3b-42b2-85dc-b50d384498a2" />
+
 ## Getting Started
 
 ### Prerequisites
