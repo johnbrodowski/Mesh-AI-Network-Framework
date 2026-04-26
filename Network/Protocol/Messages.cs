@@ -593,3 +593,104 @@ public sealed class ErrorMessage : IMessagePayload
         };
     }
 }
+
+/// <summary>
+/// Identity proof exchanged after key exchange. Each side sends one of these to prove
+/// it owns the private key matching the claimed ClientId.
+///
+/// The signature is computed over the SHA-256 hash of:
+///   sessionId || peerEcdhPublicKey || timestamp(8 BE bytes)
+///
+/// Verifier must check:
+///   1. SHA256(PublicSigningKey) == ClientId  (ClientId binding)
+///   2. ECDSA.VerifyData(signed_data, Signature, PublicSigningKey)  (ownership proof)
+///   3. timestamp is within an acceptable skew window
+/// </summary>
+public sealed class IdentityProofMessage : IMessagePayload
+{
+    public MessageType MessageType => MessageType.IdentityProof;
+
+    /// <summary>The sender's claimed ClientId.</summary>
+    public required string ClientId { get; init; }
+
+    /// <summary>The sender's public signing key (SPKI format).</summary>
+    public required byte[] PublicSigningKey { get; init; }
+
+    /// <summary>Signature over (sessionId || peerEcdhPublicKey || timestamp).</summary>
+    public required byte[] Signature { get; init; }
+
+    /// <summary>Unix-ms timestamp included in the signature payload.</summary>
+    public required long Timestamp { get; init; }
+
+    public byte[] ToBytes()
+    {
+        var clientIdBytes = Encoding.ASCII.GetBytes(ClientId);
+
+        // ClientId len (1) + ClientId + PubKey len (2) + PubKey + Sig len (2) + Sig + Timestamp (8)
+        var size = 1 + clientIdBytes.Length + 2 + PublicSigningKey.Length + 2 + Signature.Length + 8;
+        var buffer = new byte[size];
+        var offset = 0;
+
+        buffer[offset++] = (byte)clientIdBytes.Length;
+        clientIdBytes.CopyTo(buffer.AsSpan(offset));
+        offset += clientIdBytes.Length;
+
+        BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)PublicSigningKey.Length);
+        offset += 2;
+        PublicSigningKey.CopyTo(buffer.AsSpan(offset));
+        offset += PublicSigningKey.Length;
+
+        BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)Signature.Length);
+        offset += 2;
+        Signature.CopyTo(buffer.AsSpan(offset));
+        offset += Signature.Length;
+
+        BinaryPrimitives.WriteInt64BigEndian(buffer.AsSpan(offset), Timestamp);
+
+        return buffer;
+    }
+
+    public static IdentityProofMessage FromBytes(ReadOnlySpan<byte> data)
+    {
+        var offset = 0;
+
+        var clientIdLength = data[offset++];
+        var clientId = Encoding.ASCII.GetString(data.Slice(offset, clientIdLength));
+        offset += clientIdLength;
+
+        var pubKeyLength = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset, 2));
+        offset += 2;
+        var pubKey = data.Slice(offset, pubKeyLength).ToArray();
+        offset += pubKeyLength;
+
+        var sigLength = BinaryPrimitives.ReadUInt16BigEndian(data.Slice(offset, 2));
+        offset += 2;
+        var signature = data.Slice(offset, sigLength).ToArray();
+        offset += sigLength;
+
+        var timestamp = BinaryPrimitives.ReadInt64BigEndian(data.Slice(offset, 8));
+
+        return new IdentityProofMessage
+        {
+            ClientId = clientId,
+            PublicSigningKey = pubKey,
+            Signature = signature,
+            Timestamp = timestamp
+        };
+    }
+
+    /// <summary>
+    /// Computes the canonical bytes that must be signed (and verified) for an identity proof.
+    /// </summary>
+    public static byte[] BuildSignedData(byte[] sessionId, byte[] peerEcdhPublicKey, long timestamp)
+    {
+        var buffer = new byte[sessionId.Length + peerEcdhPublicKey.Length + 8];
+        var offset = 0;
+        sessionId.CopyTo(buffer.AsSpan(offset));
+        offset += sessionId.Length;
+        peerEcdhPublicKey.CopyTo(buffer.AsSpan(offset));
+        offset += peerEcdhPublicKey.Length;
+        BinaryPrimitives.WriteInt64BigEndian(buffer.AsSpan(offset), timestamp);
+        return buffer;
+    }
+}

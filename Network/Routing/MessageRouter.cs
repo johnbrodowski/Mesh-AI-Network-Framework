@@ -157,15 +157,12 @@ public sealed class MessageRouter
 
         try
         {
-            // Encrypt data for end-to-end security (relay can't read it)
-            var encryptedData = PayloadEncryption.Encrypt(data, PayloadEncryption.GenerateKey());
-
             var relayMessage = new RelayDataMessage
             {
                 SourceClientId = _localClientId,
                 TargetClientId = destinationId,
                 HopCount = 0,
-                EncryptedPayload = encryptedData
+                EncryptedPayload = data
             };
 
             var success = await _peerManager.SendAsync(route.NextHopId, relayMessage);

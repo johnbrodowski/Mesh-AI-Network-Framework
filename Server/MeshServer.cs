@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using MeshAI.Core.Configuration;
 using MeshAI.Core.Crypto;
+using MeshAI.Core.Identity;
 using MeshAI.Core.Logging;
 using MeshAI.Network.Protocol;
 using MeshAI.Network.Transport;
@@ -22,6 +23,8 @@ public sealed class MeshServer : IAsyncDisposable
     private readonly ConcurrentDictionary<string, TcpConnection> _connections = new();
 
     private readonly KeyExchange _keyExchange = new();
+    private readonly ClientIdentity _identity = ClientIdentity.Generate("mesh-server");
+    private static readonly TimeSpan IdentityProofMaxSkew = TimeSpan.FromSeconds(60);
     private readonly CancellationTokenSource _cts = new();
 
     private Task? _heartbeatTask;
@@ -162,6 +165,10 @@ public sealed class MeshServer : IAsyncDisposable
                 await HandleKeyExchangeAsync(connection, frame);
                 break;
 
+            case MessageType.IdentityProof:
+                HandleIdentityProof(connection, frame);
+                break;
+
             case MessageType.PeerListRequest:
                 await HandlePeerListRequestAsync(connection, frame);
                 break;
@@ -199,13 +206,22 @@ public sealed class MeshServer : IAsyncDisposable
     private async Task HandleRegisterAsync(TcpConnection connection, MessageFrame frame)
     {
         var message = RegisterMessage.FromBytes(frame.Payload);
-        var publicAddress = connection.RemoteEndPoint?.Address;
 
+        // The connection must have already proven ownership of this ClientId via IdentityProof.
+        if (connection.RemoteClientId == null ||
+            !string.Equals(connection.RemoteClientId, message.ClientId, StringComparison.OrdinalIgnoreCase))
+        {
+            _log.Warn("Register from unverified or mismatched client (claimed={0}, verified={1})",
+                message.ClientId[..16], connection.RemoteClientId?[..16] ?? "<none>");
+            await connection.CloseAsync();
+            return;
+        }
+
+        var publicAddress = connection.RemoteEndPoint?.Address;
         var client = _registry.Register(message, publicAddress);
 
         // Store connection mapping
         _connections[message.ClientId] = connection;
-        connection.SetRemoteClientId(message.ClientId);
 
         // Send acknowledgment
         var ack = new RegisterAckMessage
@@ -242,6 +258,17 @@ public sealed class MeshServer : IAsyncDisposable
         // Send our public key back
         var response = MessageFrame.Create(MessageType.KeyExchangeResponse, _keyExchange.PublicKey);
         await connection.SendFrameAsync(response);
+
+        // Immediately follow with our own identity proof, so the client can verify it
+        // before trusting this connection.
+        await connection.SendIdentityProofAsync(_identity);
+    }
+
+    private void HandleIdentityProof(TcpConnection connection, MessageFrame frame)
+    {
+        var proof = IdentityProofMessage.FromBytes(frame.Payload);
+        connection.VerifyAndAcceptIdentityProof(proof, IdentityProofMaxSkew);
+        _log.Debug("Verified identity proof from {0}", proof.ClientId[..16]);
     }
 
     private async Task HandlePeerListRequestAsync(TcpConnection connection, MessageFrame frame)

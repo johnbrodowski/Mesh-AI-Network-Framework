@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Sockets;
 using MeshAI.Core.Crypto;
+using MeshAI.Core.Identity;
+using MeshAI.Core.Logging;
 using MeshAI.Network.Protocol;
 
 namespace MeshAI.Network.Transport;
@@ -10,6 +12,7 @@ namespace MeshAI.Network.Transport;
 /// </summary>
 public sealed class TcpConnection : IAsyncDisposable
 {
+    private static readonly Logger _log = Logger.For<TcpConnection>();
     private readonly TcpClient _client;
     private NetworkStream? _stream;
     private MessageReader? _reader;
@@ -17,6 +20,14 @@ public sealed class TcpConnection : IAsyncDisposable
 
     private readonly ConnectionStateMachine _stateMachine = new();
     private SessionKeys? _sessionKeys;
+    private byte[]? _localEcdhPublicKey;
+    private byte[]? _peerEcdhPublicKey;
+
+    // Replay protection: timestamp window + sliding-window cache of (timestamp, messageId) tuples.
+    private static readonly TimeSpan MaxClockSkew = TimeSpan.FromSeconds(60);
+    private readonly Dictionary<ulong, long> _seenMessages = new();
+    private readonly object _seenMessagesLock = new();
+    private long _lastSeenPruneMs;
 
     private readonly CancellationTokenSource _cts = new();
     private Task? _receiveLoop;
@@ -162,6 +173,8 @@ public sealed class TcpConnection : IAsyncDisposable
         if (State != ConnectionState.KeyExchange)
             throw new InvalidOperationException($"Cannot perform key exchange in state {State}");
 
+        _localEcdhPublicKey = localPublicKey;
+
         // Send our public key
         var keyExchangeMessage = MessageFrame.Create(MessageType.KeyExchange, localPublicKey);
         await SendFrameAsync(keyExchangeMessage, cancellationToken);
@@ -172,8 +185,71 @@ public sealed class TcpConnection : IAsyncDisposable
     /// </summary>
     public void CompleteKeyExchange(KeyExchange localExchange, byte[] peerPublicKey)
     {
+        _localEcdhPublicKey = localExchange.PublicKey;
+        _peerEcdhPublicKey = peerPublicKey;
         _sessionKeys = SessionKeys.Establish(localExchange, peerPublicKey);
         _stateMachine.TryTransition(ConnectionEvent.KeyExchangeComplete, out _);
+    }
+
+    /// <summary>
+    /// Session identifier derived from the key exchange (null until key exchange completes).
+    /// </summary>
+    public byte[]? SessionId => _sessionKeys?.SessionId;
+
+    /// <summary>
+    /// The peer's ECDH public key from the key exchange (null until key exchange completes).
+    /// </summary>
+    public byte[]? PeerEcdhPublicKey => _peerEcdhPublicKey;
+
+    /// <summary>
+    /// Builds and sends an IdentityProof signed by the local identity, binding our ClientId
+    /// to the current session and the peer's ECDH public key.
+    /// </summary>
+    public async Task SendIdentityProofAsync(ClientIdentity localIdentity, CancellationToken cancellationToken = default)
+    {
+        if (_sessionKeys == null || _peerEcdhPublicKey == null)
+            throw new InvalidOperationException("Cannot send identity proof before key exchange");
+
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var signedData = IdentityProofMessage.BuildSignedData(_sessionKeys.SessionId, _peerEcdhPublicKey, timestamp);
+        var signature = localIdentity.Sign(signedData);
+
+        var proof = new IdentityProofMessage
+        {
+            ClientId = localIdentity.ClientId,
+            PublicSigningKey = localIdentity.PublicSigningKey,
+            Signature = signature,
+            Timestamp = timestamp
+        };
+
+        var frame = MessageFrame.Create(MessageType.IdentityProof, proof.ToBytes());
+        await SendFrameAsync(frame, cancellationToken);
+    }
+
+    /// <summary>
+    /// Verifies a received IdentityProof and, on success, sets RemoteClientId.
+    /// Throws on any verification failure.
+    /// </summary>
+    public void VerifyAndAcceptIdentityProof(IdentityProofMessage proof, TimeSpan maxClockSkew)
+    {
+        if (_sessionKeys == null || _localEcdhPublicKey == null)
+            throw new InvalidOperationException("Cannot verify identity proof before key exchange");
+
+        // 1. ClientId must be cryptographically bound to the public signing key
+        if (!ClientIdentity.VerifyClientIdBinding(proof.ClientId, proof.PublicSigningKey))
+            throw new InvalidOperationException("IdentityProof: ClientId does not match public signing key");
+
+        // 2. Timestamp must be within acceptable skew
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (Math.Abs(now - proof.Timestamp) > maxClockSkew.TotalMilliseconds)
+            throw new InvalidOperationException("IdentityProof: timestamp outside acceptable skew window");
+
+        // 3. Signature must be valid for (sessionId || ourEcdhPublicKey || timestamp)
+        var expectedSignedData = IdentityProofMessage.BuildSignedData(_sessionKeys.SessionId, _localEcdhPublicKey, proof.Timestamp);
+        if (!IdentityKey.Verify(proof.PublicSigningKey, expectedSignedData, proof.Signature))
+            throw new InvalidOperationException("IdentityProof: signature verification failed");
+
+        RemoteClientId = proof.ClientId;
     }
 
     /// <summary>
@@ -192,6 +268,47 @@ public sealed class TcpConnection : IAsyncDisposable
         _receiveLoop = ReceiveLoopAsync(_cts.Token);
     }
 
+    /// <summary>
+    /// Returns true if the frame is within the freshness window and has not been seen before.
+    /// Returns false (and logs a Warning) for stale or duplicate frames.
+    /// </summary>
+    private bool ValidateFrameFreshness(MessageHeader header)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var skewMs = (long)MaxClockSkew.TotalMilliseconds;
+
+        if (Math.Abs(now - header.Timestamp) > skewMs)
+        {
+            _log.Warn("Rejecting stale frame (type={0}, age={1}ms)", header.Type, now - header.Timestamp);
+            return false;
+        }
+
+        // Pack (timestamp & 0xFFFFFFFF) << 32 | messageId for a compact key.
+        // Two timestamps further than 2^32 ms (~49 days) apart could collide; well outside the skew window.
+        var key = ((ulong)(uint)header.Timestamp << 32) | header.MessageId;
+
+        lock (_seenMessagesLock)
+        {
+            // Periodic prune: anything older than 2*skew is no longer reachable.
+            if (now - _lastSeenPruneMs > skewMs)
+            {
+                var cutoff = now - 2 * skewMs;
+                var stale = _seenMessages.Where(kv => kv.Value < cutoff).Select(kv => kv.Key).ToList();
+                foreach (var k in stale) _seenMessages.Remove(k);
+                _lastSeenPruneMs = now;
+            }
+
+            if (!_seenMessages.TryAdd(key, header.Timestamp))
+            {
+                _log.Warn("Rejecting duplicate frame (type={0}, id={1}, ts={2})",
+                    header.Type, header.MessageId, header.Timestamp);
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         try
@@ -206,6 +323,13 @@ public sealed class TcpConnection : IAsyncDisposable
                 }
 
                 _lastActivity = DateTime.UtcNow;
+
+                // Replay / freshness check: reject stale or duplicate frames.
+                if (!ValidateFrameFreshness(frame.Header))
+                {
+                    // Drop the frame silently (already logged inside the validator).
+                    continue;
+                }
 
                 // Handle pong internally
                 if (frame.Header.Type == MessageType.Pong)

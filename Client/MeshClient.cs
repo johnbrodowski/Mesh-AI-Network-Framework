@@ -39,6 +39,7 @@ public sealed class MeshClient : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
 
     private ClientState _state = ClientState.Disconnected;
+    private readonly object _stateLock = new();
     private int _reconnectAttempts;
 
     private Task? _heartbeatTask;
@@ -210,6 +211,19 @@ public sealed class MeshClient : IAsyncDisposable
             _serverConnection.CompleteKeyExchange(_keyExchange, keyResponse.Payload);
             _log.Debug("Key exchange completed with server");
 
+            // Receive and verify the server's IdentityProof (sent immediately after KeyExchangeResponse).
+            var serverProofFrame = await _serverConnection.ReceiveAsync(cancellationToken);
+            if (serverProofFrame?.Header.Type != MessageType.IdentityProof)
+            {
+                throw new InvalidOperationException("Expected IdentityProof from server");
+            }
+            var serverProof = IdentityProofMessage.FromBytes(serverProofFrame.Payload);
+            _serverConnection.VerifyAndAcceptIdentityProof(serverProof, IdentityProofMaxSkew);
+            _log.Debug("Verified server identity {0}", serverProof.ClientId[..16]);
+
+            // Send our own identity proof so the server can verify us.
+            await _serverConnection.SendIdentityProofAsync(_identity, cancellationToken);
+
             // Register with server
             await RegisterWithServerAsync(cancellationToken);
 
@@ -219,7 +233,7 @@ public sealed class MeshClient : IAsyncDisposable
             _serverConnection.StartReceiving();
 
             SetState(ClientState.Connected);
-            _reconnectAttempts = 0;
+            Interlocked.Exchange(ref _reconnectAttempts, 0);
         }
         catch (Exception ex)
         {
@@ -322,7 +336,7 @@ public sealed class MeshClient : IAsyncDisposable
         {
             if (!_peerManager.IsConnected(peer.ClientId))
             {
-                await _peerManager.ConnectAsync(peer, _keyExchange, _identity.ClientId,
+                await _peerManager.ConnectAsync(peer, _keyExchange, _identity,
                     _config.ConnectionTimeout);
             }
         }
@@ -347,8 +361,18 @@ public sealed class MeshClient : IAsyncDisposable
         }
     }
 
+    private const int MaxHopCount = 10;
+    private static readonly TimeSpan IdentityProofMaxSkew = TimeSpan.FromSeconds(60);
+
     private async Task RelayMessageAsync(RelayDataMessage message)
     {
+        if (message.HopCount >= MaxHopCount)
+        {
+            _log.Warn("Dropping relayed message from {0}: hop limit reached ({1})",
+                message.SourceClientId[..16], message.HopCount);
+            return;
+        }
+
         // Try to forward to target via direct peer connection
         if (_peerManager.IsConnected(message.TargetClientId))
         {
@@ -381,10 +405,10 @@ public sealed class MeshClient : IAsyncDisposable
 
     private async Task ReconnectLoopAsync(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested && _reconnectAttempts < _config.MaxReconnectAttempts)
+        while (!cancellationToken.IsCancellationRequested && Volatile.Read(ref _reconnectAttempts) < _config.MaxReconnectAttempts)
         {
-            _reconnectAttempts++;
-            _log.Info("Reconnection attempt {0}/{1}", _reconnectAttempts, _config.MaxReconnectAttempts);
+            var attempt = Interlocked.Increment(ref _reconnectAttempts);
+            _log.Info("Reconnection attempt {0}/{1}", attempt, _config.MaxReconnectAttempts);
 
             try
             {
@@ -422,6 +446,17 @@ public sealed class MeshClient : IAsyncDisposable
             connection.CompleteKeyExchange(_keyExchange, frame.Payload);
             var response = MessageFrame.Create(MessageType.KeyExchangeResponse, _keyExchange.PublicKey);
             await connection.SendFrameAsync(response);
+            // Immediately follow with our identity proof.
+            await connection.SendIdentityProofAsync(_identity);
+            return;
+        }
+
+        // Handle inbound identity proof - verify before any further interaction.
+        if (frame.Header.Type == MessageType.IdentityProof)
+        {
+            var proof = IdentityProofMessage.FromBytes(frame.Payload);
+            connection.VerifyAndAcceptIdentityProof(proof, IdentityProofMaxSkew);
+            _log.Debug("Verified incoming peer identity {0}", proof.ClientId[..16]);
             return;
         }
 
@@ -430,6 +465,17 @@ public sealed class MeshClient : IAsyncDisposable
         if (frame.Header.Type == MessageType.PeerConnect)
         {
             var message = DirectMessagePayload.FromBytes(frame.Payload);
+
+            // Reject if claimed source doesn't match the verified ClientId from IdentityProof.
+            if (connection.RemoteClientId == null ||
+                !string.Equals(connection.RemoteClientId, message.SourceClientId, StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Warn("PeerConnect from unverified/mismatched client (claimed={0}, verified={1})",
+                    message.SourceClientId[..16], connection.RemoteClientId?[..16] ?? "<none>");
+                await connection.CloseAsync();
+                return;
+            }
+
             var peerInfo = new PeerInfo
             {
                 ClientId = message.SourceClientId,
@@ -439,7 +485,6 @@ public sealed class MeshClient : IAsyncDisposable
                 LastSeen = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
 
-            connection.SetRemoteClientId(message.SourceClientId);
             _peerManager.AcceptPeer(connection, peerInfo);
 
             var ack = MessageFrame.Create(MessageType.PeerConnectAck, []);
@@ -498,7 +543,7 @@ public sealed class MeshClient : IAsyncDisposable
         var peerInfo = _knownPeers.FirstOrDefault(p => p.ClientId == targetClientId);
         if (peerInfo != null)
         {
-            var peer = await _peerManager.ConnectAsync(peerInfo, _keyExchange, _identity.ClientId,
+            var peer = await _peerManager.ConnectAsync(peerInfo, _keyExchange, _identity,
                 _config.ConnectionTimeout, cancellationToken);
 
             if (peer != null)
@@ -676,8 +721,12 @@ public sealed class MeshClient : IAsyncDisposable
 
     private void SetState(ClientState newState)
     {
-        var oldState = _state;
-        _state = newState;
+        ClientState oldState;
+        lock (_stateLock)
+        {
+            oldState = _state;
+            _state = newState;
+        }
         if (oldState != newState)
         {
             _log.Info("State: {0} -> {1}", oldState, newState);

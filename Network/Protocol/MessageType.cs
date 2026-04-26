@@ -34,6 +34,12 @@ public enum MessageType : byte
     /// </summary>
     KeyExchangeResponse = 0x05,
 
+    /// <summary>
+    /// Identity proof (signed binding of ClientId to public signing key + session).
+    /// Sent after key exchange to prove ownership of the claimed ClientId.
+    /// </summary>
+    IdentityProof = 0x06,
+
     // ============================================
     // Discovery (0x10 - 0x1F)
     // ============================================

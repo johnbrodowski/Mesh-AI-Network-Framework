@@ -1,3 +1,5 @@
+using MeshAI.Core.Logging;
+
 namespace MeshAI.Network.Protocol;
 
 /// <summary>
@@ -81,6 +83,7 @@ public sealed class MessageFrame
 /// </summary>
 public sealed class MessageReader
 {
+    private static readonly Logger _log = Logger.For<MessageReader>();
     private readonly Stream _stream;
     private readonly byte[] _headerBuffer = new byte[MessageHeader.Size];
 
@@ -111,7 +114,11 @@ public sealed class MessageReader
         {
             bytesRead = await ReadExactlyAsync(payload, (int)header.PayloadLength, cancellationToken);
             if (bytesRead < header.PayloadLength)
+            {
+                _log.Warn("Partial frame read: expected {0} bytes, got {1} (type={2})",
+                    header.PayloadLength, bytesRead, header.Type);
                 return null;
+            }
         }
 
         return MessageFrame.FromParts(header, payload);

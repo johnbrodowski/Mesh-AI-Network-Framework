@@ -5,19 +5,30 @@ namespace MeshAI.Core.Identity;
 
 /// <summary>
 /// Represents a client's identity in the mesh network.
-/// Identity is derived from hardware fingerprint and an optional salt.
+/// ClientId is derived from a public signing key (cryptographically self-vouching).
+/// The signing key is deterministically derived from the local hardware fingerprint plus an optional salt,
+/// so the same machine produces the same ClientId across runs.
 /// </summary>
-public sealed class ClientIdentity
+public sealed class ClientIdentity : IDisposable
 {
+    private readonly IdentityKey _signingKey;
+    private bool _disposed;
+
     /// <summary>
-    /// The unique client identifier (SHA256 hash of hardware fingerprint + salt).
+    /// The unique client identifier (SHA-256 hash of the public signing key, hex-encoded).
     /// </summary>
     public string ClientId { get; }
 
     /// <summary>
     /// The raw hardware fingerprint (for local verification only).
+    /// Empty when this identity represents a remote client.
     /// </summary>
     public string HardwareHash { get; }
+
+    /// <summary>
+    /// Public signing key in SPKI format. Distribute this to peers.
+    /// </summary>
+    public byte[] PublicSigningKey => _signingKey.PublicKey;
 
     /// <summary>
     /// Timestamp when this identity was generated.
@@ -29,41 +40,58 @@ public sealed class ClientIdentity
     /// </summary>
     public string ShortId => ClientId[..16];
 
-    private ClientIdentity(string clientId, string hardwareHash, DateTime generatedAt)
+    private ClientIdentity(IdentityKey signingKey, string hardwareHash, DateTime generatedAt)
     {
-        ClientId = clientId;
+        _signingKey = signingKey;
         HardwareHash = hardwareHash;
         GeneratedAt = generatedAt;
+        ClientId = ComputeClientId(signingKey.PublicKey);
     }
 
     /// <summary>
-    /// Generates a new client identity from the current machine's hardware.
+    /// Generates a client identity from the current machine's hardware fingerprint and an optional salt.
+    /// The same machine + salt always produces the same ClientId.
     /// </summary>
-    /// <param name="salt">Optional salt for additional uniqueness.</param>
     public static ClientIdentity Generate(string? salt = null)
     {
         var hardwareHash = HardwareFingerprint.GetFingerprint();
-        var combinedInput = hardwareHash + (salt ?? string.Empty);
-
-        var bytes = Encoding.UTF8.GetBytes(combinedInput);
-        var hash = SHA256.HashData(bytes);
-        var clientId = Convert.ToHexString(hash).ToLowerInvariant();
-
-        return new ClientIdentity(clientId, hardwareHash, DateTime.UtcNow);
+        var seedInput = $"{hardwareHash}|{salt ?? string.Empty}";
+        var seed = SHA256.HashData(Encoding.UTF8.GetBytes(seedInput));
+        var signingKey = IdentityKey.FromSeed(seed);
+        return new ClientIdentity(signingKey, hardwareHash, DateTime.UtcNow);
     }
 
     /// <summary>
-    /// Creates a ClientIdentity from an existing ID (for remote clients).
+    /// Computes the ClientId for a given public signing key.
     /// </summary>
-    public static ClientIdentity FromId(string clientId)
+    public static string ComputeClientId(byte[] publicSigningKey)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
-        return new ClientIdentity(clientId.ToLowerInvariant(), string.Empty, DateTime.UtcNow);
+        var hash = SHA256.HashData(publicSigningKey);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     /// <summary>
-    /// Verifies that the current hardware matches this identity.
-    /// Used to ensure files are only usable on the matching machine.
+    /// Verifies that a public signing key belongs to a claimed ClientId.
+    /// </summary>
+    public static bool VerifyClientIdBinding(string claimedClientId, byte[] publicSigningKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(claimedClientId);
+        ArgumentNullException.ThrowIfNull(publicSigningKey);
+        var expected = ComputeClientId(publicSigningKey);
+        return string.Equals(expected, claimedClientId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Signs data with this identity's private signing key.
+    /// </summary>
+    public byte[] Sign(byte[] data)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _signingKey.Sign(data);
+    }
+
+    /// <summary>
+    /// Verifies that the current hardware matches this identity (local-only check).
     /// </summary>
     public bool VerifyHardwareMatch()
     {
@@ -112,4 +140,13 @@ public sealed class ClientIdentity
     }
 
     public static bool operator !=(ClientIdentity? left, ClientIdentity? right) => !(left == right);
+
+    public void Dispose()
+    {
+        if (!_disposed)
+        {
+            _signingKey.Dispose();
+            _disposed = true;
+        }
+    }
 }

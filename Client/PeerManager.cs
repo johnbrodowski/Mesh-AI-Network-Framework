@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using MeshAI.Core.Crypto;
+using MeshAI.Core.Identity;
 using MeshAI.Core.Logging;
 using MeshAI.Network.Protocol;
 using MeshAI.Network.Transport;
@@ -62,16 +63,19 @@ public sealed class PeerManager : IAsyncDisposable
     public bool IsConnected(string clientId) =>
         _peers.TryGetValue(clientId, out var peer) && peer.IsConnected;
 
+    private static readonly TimeSpan IdentityProofMaxSkew = TimeSpan.FromSeconds(60);
+
     /// <summary>
     /// Connects to a peer.
     /// </summary>
     public async Task<PeerConnection?> ConnectAsync(
         PeerInfo peerInfo,
         KeyExchange localKeyExchange,
-        string localClientId,
+        ClientIdentity localIdentity,
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
+        var localClientId = localIdentity.ClientId;
         // Check if already connected
         if (_peers.TryGetValue(peerInfo.ClientId, out var existing) && existing.IsConnected)
         {
@@ -116,7 +120,25 @@ public sealed class PeerManager : IAsyncDisposable
                 }
 
                 connection.CompleteKeyExchange(localKeyExchange, response.Payload);
-                connection.SetRemoteClientId(peerInfo.ClientId);
+
+                // Receive and verify the peer's IdentityProof.
+                var proofFrame = await connection.ReceiveAsync(cancellationToken);
+                if (proofFrame?.Header.Type != MessageType.IdentityProof)
+                {
+                    throw new InvalidOperationException("Expected IdentityProof from peer");
+                }
+                var peerProof = IdentityProofMessage.FromBytes(proofFrame.Payload);
+                connection.VerifyAndAcceptIdentityProof(peerProof, IdentityProofMaxSkew);
+
+                // The peer's verified ClientId must match what we expected from PeerInfo.
+                if (!string.Equals(peerProof.ClientId, peerInfo.ClientId, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        $"Peer identity mismatch: expected {peerInfo.ClientId[..16]}, got {peerProof.ClientId[..16]}");
+                }
+
+                // Send our own identity proof.
+                await connection.SendIdentityProofAsync(localIdentity, cancellationToken);
 
                 // Send peer connect using PeerConnect message type
                 var connectPayload = new DirectMessagePayload

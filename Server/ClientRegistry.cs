@@ -24,7 +24,7 @@ public sealed class RegisteredClient
     /// <summary>
     /// Clients that this client can directly reach (reported by client).
     /// </summary>
-    public HashSet<string> ReachablePeers { get; } = [];
+    public ConcurrentDictionary<string, byte> ReachablePeers { get; } = new();
 
     /// <summary>
     /// Current connection state as seen by server.
@@ -227,7 +227,7 @@ public sealed class ClientRegistry
             client.ReachablePeers.Clear();
             foreach (var peer in reachablePeers)
             {
-                client.ReachablePeers.Add(peer);
+                client.ReachablePeers.TryAdd(peer, 0);
             }
         }
     }
@@ -257,7 +257,7 @@ public sealed class ClientRegistry
         return _clients.Values
             .Where(c => c.ClientId != sourceId && c.ClientId != targetId)
             .Where(c => c.IsConnected && c.CanRelay)
-            .Where(c => c.ReachablePeers.Contains(targetId))
+            .Where(c => c.ReachablePeers.ContainsKey(targetId))
             .OrderByDescending(c => c.QualityScore);
     }
 
